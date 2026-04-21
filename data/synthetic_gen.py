@@ -9,10 +9,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # 2. Lấy API Key từ biến môi trường
-api_key = os.getenv("GEMINI_API_KEY")
+api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
 
 if not api_key:
-    raise ValueError("Không tìm thấy GEMINI_API_KEY trong file .env!")
+    raise ValueError("Không tìm thấy GOOGLE_API_KEY hoặc GEMINI_API_KEY trong file .env!")
 
 genai.configure(api_key=api_key)
 model = genai.GenerativeModel('gemini-1.5-flash')
