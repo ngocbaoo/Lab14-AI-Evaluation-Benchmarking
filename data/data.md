@@ -1,8 +1,4 @@
-# Bối-cảnh-lịch-mới 2
-
-## Luật, Hành chính nha nước (Trường Đại học Luật Thành phố Hồ Chí Minh)
-
-# Bối-cảnh-lịch-mới 2
+# Bối cảnh lịch sử mới
 
 ## Luật, Hành chính nha nước (Trường Đại học Luật Thành phố Hồ Chí Minh)
 
