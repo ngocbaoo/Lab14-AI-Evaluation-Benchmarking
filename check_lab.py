@@ -48,6 +48,12 @@ def validate_lab():
     else:
         print(f"⚠️ CẢNH BÁO: Thiếu Retrieval Metrics (hit_rate).")
 
+    has_mrr = "mrr" in metrics
+    if has_mrr:
+        print(f"✅ Đã tìm thấy Retrieval Metrics (MRR: {metrics['mrr']:.3f})")
+    else:
+        print(f"⚠️ CẢNH BÁO: Thiếu Retrieval Metrics (mrr).")
+
     has_multi_judge = "agreement_rate" in metrics
     if has_multi_judge:
         print(f"✅ Đã tìm thấy Multi-Judge Metrics (Agreement Rate: {metrics['agreement_rate']*100:.1f}%)")

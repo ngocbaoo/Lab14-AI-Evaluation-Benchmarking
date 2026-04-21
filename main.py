@@ -4,15 +4,25 @@ import os
 import time
 from engine.runner import BenchmarkRunner
 from agent.main_agent import MainAgent
+from engine.retrieval_eval import RetrievalEvaluator
 
 # Giả lập các components Expert
 class ExpertEvaluator:
+    def __init__(self, *, retrieval_top_k: int = 3):
+        self.retrieval_top_k = retrieval_top_k
+        self.retrieval_evaluator = RetrievalEvaluator()
+
     async def score(self, case, resp): 
-        # Giả lập tính toán Hit Rate và MRR
+        retrieval_scores, retrieval_error = self.retrieval_evaluator.evaluate_from_case_and_response(
+            case, resp, top_k=self.retrieval_top_k
+        )
+        if retrieval_scores is None:
+            retrieval_scores = {"hit_rate": 0.0, "mrr": 0.0, "error": retrieval_error}
+
         return {
             "faithfulness": 0.9, 
             "relevancy": 0.8,
-            "retrieval": {"hit_rate": 1.0, "mrr": 0.5}
+            "retrieval": retrieval_scores
         }
 
 class MultiModelJudge:
@@ -41,11 +51,17 @@ async def run_benchmark_with_results(agent_version: str):
     results = await runner.run_all(dataset)
 
     total = len(results)
+    retrieval_items = [r["ragas"]["retrieval"] for r in results if isinstance(r.get("ragas", {}).get("retrieval"), dict)]
+    valid_retrieval = [x for x in retrieval_items if isinstance(x.get("hit_rate"), (int, float)) and isinstance(x.get("mrr"), (int, float))]
+    avg_hit_rate = sum(x["hit_rate"] for x in valid_retrieval) / len(valid_retrieval) if valid_retrieval else 0.0
+    avg_mrr = sum(x["mrr"] for x in valid_retrieval) / len(valid_retrieval) if valid_retrieval else 0.0
+
     summary = {
         "metadata": {"version": agent_version, "total": total, "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")},
         "metrics": {
             "avg_score": sum(r["judge"]["final_score"] for r in results) / total,
-            "hit_rate": sum(r["ragas"]["retrieval"]["hit_rate"] for r in results) / total,
+            "hit_rate": avg_hit_rate,
+            "mrr": avg_mrr,
             "agreement_rate": sum(r["judge"]["agreement_rate"] for r in results) / total
         }
     }
