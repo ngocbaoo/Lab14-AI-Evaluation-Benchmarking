@@ -5,3 +5,4 @@ __pycache__/
 reports/
 data/golden_set.jsonl
 .codex
+.venv/
