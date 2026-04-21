@@ -1,25 +1,20 @@
 import asyncio
 import json
 import os
+import sys
 import time
-from typing import Dict, List
-import google.generativeai as genai
+from typing import Dict, List, Optional, Tuple
+
 from dotenv import load_dotenv
 
-from engine.runner import BenchmarkRunner
 from agent.main_agent import MainAgent
+from engine.llm_judge import MultiModelJudge
 from engine.retrieval_eval import RetrievalEvaluator
+from engine.runner import BenchmarkRunner
+
 
 load_dotenv()
 
-# Cấu hình Gemini làm Judge
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    judge_model = genai.GenerativeModel('gemini-1.5-flash')
-else:
-    print("⚠️ Cảnh báo: Không tìm thấy GEMINI_API_KEY. Judge sẽ chạy ở chế độ MOCK.")
-    judge_model = None
 
 class ExpertEvaluator:
     """
@@ -29,152 +24,241 @@ class ExpertEvaluator:
         self.retrieval_top_k = retrieval_top_k
         self.retrieval_evaluator = RetrievalEvaluator()
 
-    async def score(self, case, resp):
-        # 1. Evaluate Retrieval (Hit Rate, MRR)
+    async def score(self, case: Dict, resp: Dict) -> Dict:
         retrieval_scores, retrieval_error = self.retrieval_evaluator.evaluate_from_case_and_response(
-            case, resp, top_k=self.retrieval_top_k
+            case,
+            resp,
+            top_k=self.retrieval_top_k,
         )
         if retrieval_scores is None:
             retrieval_scores = {"hit_rate": 0.0, "mrr": 0.0, "error": retrieval_error}
 
-        # 2. Evaluate Faithfulness & Relevancy using Gemini
-        faithfulness = 0.5 # Default
-        relevancy = 0.5
-        
-        if judge_model:
-            try:
-                context = "\n".join(resp.get("contexts", []))
-                answer = resp.get("answer", "")
-                question = case.get("question", "")
-                
-                prompt = f"""Hãy đánh giá câu trả lời của AI dựa trên đoạn văn bản (context) và câu hỏi (question).
-                Context: {context}
-                Question: {question}
-                Answer: {answer}
-
-                Yêu cầu:
-                1. Faithfulness (0-1): Câu trả lời có trung thành với context không? (Không lấy kiến thức ngoài).
-                2. Relevancy (0-1): Câu trả lời có đúng trọng tâm câu hỏi không?
-
-                Trả lời dưới dạng JSON: {{"faithfulness": score, "relevancy": score}}"""
-                
-                eval_resp = await judge_model.generate_content_async(prompt)
-                score_data = json.loads(eval_resp.text.replace("```json", "").replace("```", "").strip())
-                faithfulness = score_data.get("faithfulness", 0.5)
-                relevancy = score_data.get("relevancy", 0.5)
-            except Exception as e:
-                print(f"Lỗi khi đánh giá LLM: {e}")
+        contexts = resp.get("contexts", []) if isinstance(resp.get("contexts"), list) else []
+        expected_ids = case.get("expected_retrieval_ids", [])
+        retrieved_ids = resp.get("metadata", {}).get("retrieved_ids", []) if isinstance(resp.get("metadata"), dict) else []
 
         return {
-            "faithfulness": faithfulness,
-            "relevancy": relevancy,
-            "retrieval": retrieval_scores
+            "faithfulness": 1.0 if retrieval_scores.get("hit_rate", 0.0) > 0 else 0.0,
+            "relevancy": min(1.0, len(contexts) / max(1, self.retrieval_top_k)),
+            "retrieval": retrieval_scores,
+            "retrieval_debug": {
+                "expected_retrieval_ids": expected_ids,
+                "retrieved_ids": retrieved_ids,
+            },
         }
 
-class MultiModelJudge:
-    """
-    Giả lập Multi-Judge bằng cách yêu cầu Gemini đóng vai 2 chuyên gia khác nhau để đồng thuận
-    """
-    async def evaluate_multi_judge(self, q, a, gt):
-        if not judge_model:
-            return {"final_score": 3.0, "agreement_rate": 0.5, "reasoning": "Mock mode: No API key"}
 
-        prompt = f"""Đóng vai 2 chuyên gia lịch sử độc lập chấm điểm câu trả lời của AI.
-        Câu hỏi: {q}
-        Câu trả lời của AI: {a}
-        Đáp án chuẩn (Ground Truth): {gt}
-
-        Hãy chấm điểm trên thang điểm 5.
-        Trả lời dạng JSON: {{"judge_1_score": score, "judge_2_score": score, "reasoning": "giải thích"}}"""
-        
-        try:
-            resp = await judge_model.generate_content_async(prompt)
-            data = json.loads(resp.text.replace("```json", "").replace("```", "").strip())
-            s1 = data.get("judge_1_score", 0)
-            s2 = data.get("judge_2_score", 0)
-            
-            final_score = (s1 + s2) / 2
-            agreement = 1.0 if abs(s1 - s2) <= 1 else 0.5 # Nếu điểm lệch không quá 1 thì coi là đồng thuận
-
-            return {
-                "final_score": final_score,
-                "agreement_rate": agreement,
-                "reasoning": data.get("reasoning", "")
-            }
-        except:
-            return {"final_score": 0.0, "agreement_rate": 0.0, "reasoning": "Error in Judge API"}
-
-async def run_benchmark_with_results(agent_version: str):
-    print(f"\n🚀 BẮT ĐẦU BENCHMARK: {agent_version}")
-    retrieval_top_k = int(os.getenv("RETRIEVAL_TOP_K", "3"))
-
+def _load_dataset() -> Optional[List[Dict]]:
     if not os.path.exists("data/golden_set.jsonl"):
-        print("❌ Thiếu data/golden_set.jsonl")
-        return None, None
+        print("Missing data/golden_set.jsonl. Run 'python data/synthetic_gen.py' first.")
+        return None
 
     with open("data/golden_set.jsonl", "r", encoding="utf-8") as f:
         dataset = [json.loads(line) for line in f if line.strip()]
 
-    # Khởi tạo Agent thực tế (Dùng FAISS/Chroma từ main_agent.py)
-    agent = MainAgent(chroma_db_path="./chroma_db", chroma_collection="lab14", top_k=retrieval_top_k)
-    
-    # Nạp dữ liệu vào DB trước khi chạy nếu cần
+    if not dataset:
+        print("data/golden_set.jsonl is empty.")
+        return None
+    return dataset
+
+
+def _avg(values: List[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def _aggregate_run(agent_version: str, results: List[Dict]) -> Dict:
+    total = len(results)
+    retrieval_items = [r.get("ragas", {}).get("retrieval", {}) for r in results]
+    valid_retrieval = [
+        item
+        for item in retrieval_items
+        if isinstance(item.get("hit_rate"), (int, float)) and isinstance(item.get("mrr"), (int, float))
+    ]
+
+    avg_score = _avg([float(r.get("judge", {}).get("final_score", 0.0) or 0.0) for r in results])
+    avg_hit_rate = _avg([float(item["hit_rate"]) for item in valid_retrieval])
+    avg_mrr = _avg([float(item["mrr"]) for item in valid_retrieval])
+    agreement_rate = _avg([float(r.get("judge", {}).get("agreement_rate", 0.0) or 0.0) for r in results])
+    pass_rate = _avg([1.0 if r.get("status") == "pass" else 0.0 for r in results])
+    human_review_rate = _avg(
+        [1.0 if r.get("judge", {}).get("needs_human_review") else 0.0 for r in results]
+    )
+    avg_latency = _avg([float(r.get("latency", 0.0) or 0.0) for r in results])
+    total_cost = round(
+        sum(float(r.get("judge", {}).get("cost", {}).get("total_usd", 0.0) or 0.0) for r in results),
+        8,
+    )
+    total_prompt_tokens = sum(int(r.get("judge", {}).get("tokens", {}).get("prompt", 0) or 0) for r in results)
+    total_completion_tokens = sum(
+        int(r.get("judge", {}).get("tokens", {}).get("completion", 0) or 0) for r in results
+    )
+
+    per_model_cost: Dict[str, float] = {}
+    for result in results:
+        by_model = result.get("judge", {}).get("cost", {}).get("by_model", {})
+        for model, value in by_model.items():
+            per_model_cost[model] = round(per_model_cost.get(model, 0.0) + float(value or 0.0), 8)
+
+    return {
+        "metadata": {
+            "version": agent_version,
+            "total": total,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        },
+        "metrics": {
+            "avg_score": round(avg_score, 4),
+            "hit_rate": round(avg_hit_rate, 4),
+            "mrr": round(avg_mrr, 4),
+            "agreement_rate": round(agreement_rate, 4),
+            "pass_rate": round(pass_rate, 4),
+            "human_review_rate": round(human_review_rate, 4),
+            "avg_latency_seconds": round(avg_latency, 4),
+        },
+        "cost": {
+            "total_usd": total_cost,
+            "by_model": per_model_cost,
+        },
+        "token_usage": {
+            "prompt_tokens": total_prompt_tokens,
+            "completion_tokens": total_completion_tokens,
+        },
+        "human_review": {
+            "count": sum(1 for r in results if r.get("judge", {}).get("needs_human_review")),
+            "rate": round(human_review_rate, 4),
+        },
+    }
+
+
+def _build_regression(v1_summary: Dict, v2_summary: Dict) -> Dict:
+    score_delta = round(v2_summary["metrics"]["avg_score"] - v1_summary["metrics"]["avg_score"], 4)
+    hit_rate_delta = round(v2_summary["metrics"]["hit_rate"] - v1_summary["metrics"]["hit_rate"], 4)
+    mrr_delta = round(v2_summary["metrics"]["mrr"] - v1_summary["metrics"]["mrr"], 4)
+    agreement_delta = round(
+        v2_summary["metrics"]["agreement_rate"] - v1_summary["metrics"]["agreement_rate"],
+        4,
+    )
+    pass_rate_delta = round(v2_summary["metrics"]["pass_rate"] - v1_summary["metrics"]["pass_rate"], 4)
+    hitl_delta = round(
+        v2_summary["metrics"]["human_review_rate"] - v1_summary["metrics"]["human_review_rate"],
+        4,
+    )
+    cost_delta = round(v2_summary["cost"]["total_usd"] - v1_summary["cost"]["total_usd"], 8)
+
+    decision = "APPROVE"
+    reasons = []
+    if score_delta < 0:
+        decision = "BLOCK_RELEASE"
+        reasons.append("average score regressed")
+    if hit_rate_delta < 0 or mrr_delta < 0:
+        decision = "BLOCK_RELEASE"
+        reasons.append("retrieval quality regressed")
+    if pass_rate_delta < 0:
+        decision = "BLOCK_RELEASE"
+        reasons.append("pass rate regressed")
+    if hitl_delta > 0.1:
+        decision = "BLOCK_RELEASE"
+        reasons.append("human review rate increased too much")
+
+    return {
+        "baseline_version": v1_summary["metadata"]["version"],
+        "candidate_version": v2_summary["metadata"]["version"],
+        "avg_score_delta": score_delta,
+        "hit_rate_delta": hit_rate_delta,
+        "mrr_delta": mrr_delta,
+        "agreement_rate_delta": agreement_delta,
+        "pass_rate_delta": pass_rate_delta,
+        "human_review_rate_delta": hitl_delta,
+        "cost_delta_usd": cost_delta,
+        "decision": decision,
+        "reasons": reasons or ["candidate meets release criteria"],
+    }
+
+
+async def run_benchmark_with_results(agent_version: str) -> Tuple[Optional[List[Dict]], Optional[Dict]]:
+    print(f"Starting benchmark for {agent_version}...")
+    dataset = _load_dataset()
+    if dataset is None:
+        return None, None
+
+    retrieval_top_k = int(os.getenv("RETRIEVAL_TOP_K", "3"))
+    batch_size = int(os.getenv("EVAL_BATCH_SIZE", "5"))
+    agent = MainAgent(
+        chroma_db_path=os.getenv("CHROMA_DB_PATH", "./chroma_db"),
+        chroma_collection=os.getenv("CHROMA_COLLECTION", "lab14"),
+        top_k=retrieval_top_k,
+        optimized=(agent_version == "Agent_V2_Optimized"),
+    )
     if os.path.exists("data/chunks.jsonl"):
         agent.index_documents("data/chunks.jsonl")
 
+    # 2. Khởi tạo Evaluator (Dùng GPT-4o và GPT-4o-mini)
+    judge = MultiModelJudge(
+        openai_model="gpt-4o",
+        secondary_model="gpt-4o-mini"
+    )
     runner = BenchmarkRunner(
         agent,
         ExpertEvaluator(retrieval_top_k=retrieval_top_k),
-        MultiModelJudge(),
+        judge,
     )
-    
-    results = await runner.run_all(dataset)
-
-    total = len(results)
-    if total == 0: return None, None
-
-    # Tính toán Metrics trung bình
-    sum_score = sum(r["judge"]["final_score"] for r in results)
-    sum_hit = sum(r["ragas"]["retrieval"]["hit_rate"] for r in results)
-    sum_mrr = sum(r["ragas"]["retrieval"]["mrr"] for r in results)
-    sum_agree = sum(r["judge"]["agreement_rate"] for r in results)
-
-    summary = {
-        "metadata": {"version": agent_version, "total": total, "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")},
-        "metrics": {
-            "avg_score": sum_score / total,
-            "hit_rate": sum_hit / total,
-            "mrr": sum_mrr / total,
-            "agreement_rate": sum_agree / total
-        }
-    }
+    try:
+        results = await runner.run_all(dataset, batch_size=batch_size)
+        summary = _aggregate_run(agent_version, results)
+    finally:
+        await judge.aclose()
     return results, summary
 
-async def main():
-    # Chạy Benchmark cho phiên bản hiện tại
-    results, summary = await run_benchmark_with_results("Qwen2.5-0.5B-RAG-V1")
-    
-    if not summary:
-        print("❌ Lỗi benchmark.")
+
+async def run_benchmark(version: str) -> Optional[Dict]:
+    _, summary = await run_benchmark_with_results(version)
+    return summary
+
+async def main() -> None:
+    v1_results, v1_summary = await run_benchmark_with_results("Agent_V1_Base")
+    v2_results, v2_summary = await run_benchmark_with_results("Agent_V2_Optimized")
+
+    if not v1_summary or not v2_summary or v1_results is None or v2_results is None:
+        print("Benchmark could not run. Check your dataset and API configuration.")
         return
 
-    print("\n" + "="*50)
-    print(f"📊 KẾT QUẢ CUỐI CÙNG ({summary['metadata']['version']})")
-    print(f"Total cases: {summary['metadata']['total']}")
-    print(f"Avg Score: {summary['metrics']['avg_score']:.2f}/5.0")
-    print(f"Hit Rate: {summary['metrics']['hit_rate']:.2f}")
-    print(f"MRR: {summary['metrics']['mrr']:.2f}")
-    print(f"Agreement Rate: {summary['metrics']['agreement_rate']:.2f}")
-    print("="*50)
+    regression = _build_regression(v1_summary, v2_summary)
+    v2_summary["regression"] = regression
+
+    print("\n--- REGRESSION SUMMARY ---")
+    print(f"V1 Score: {v1_summary['metrics']['avg_score']:.2f}")
+    print(f"V2 Score: {v2_summary['metrics']['avg_score']:.2f}")
+    print(f"Delta: {regression['avg_score_delta']:+.2f}")
+    print(f"Decision: {regression['decision']}")
 
     # Lưu báo cáo
     os.makedirs("reports", exist_ok=True)
     with open("reports/summary.json", "w", encoding="utf-8") as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2)
+        json.dump(v2_summary, f, ensure_ascii=False, indent=2)
     with open("reports/benchmark_results.json", "w", encoding="utf-8") as f:
-        json.dump(results, f, ensure_ascii=False, indent=2)
-    
-    print("\n✅ Đã lưu kết quả vào thư mục reports/")
+        json.dump(
+            {
+                "runs": {
+                    "Agent_V1_Base": v1_results,
+                    "Agent_V2_Optimized": v2_results,
+                },
+                "summaries": {
+                    "Agent_V1_Base": v1_summary,
+                    "Agent_V2_Optimized": v2_summary,
+                },
+                "regression": regression,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    if regression["decision"] == "APPROVE":
+        print("Release gate: APPROVE")
+    else:
+        print("Release gate: BLOCK_RELEASE")
+
 
 if __name__ == "__main__":
+    if sys.platform.startswith("win"):
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())

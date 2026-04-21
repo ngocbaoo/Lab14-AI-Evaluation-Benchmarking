@@ -1,160 +1,113 @@
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+from transformers import pipeline
 from sentence_transformers import SentenceTransformer
 import chromadb
-from chromadb.config import Settings
-import numpy as np
-from typing import List, Dict, Optional
 import os
-import json
+from typing import List, Dict, Any, Optional
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
 class MainAgent:
-    """
-    Hệ thống RAG chuyên nghiệp sử dụng Qwen2.5 và ChromaDB cho dữ liệu Lịch sử.
-    Đã tối ưu hóa cho GPU và tích hợp tốt với hệ thống Benchmark.
-    """
-    def __init__(self, 
-                 model_name: str = "Qwen/Qwen2.5-0.5B-Instruct", 
-                 embed_model_name: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-                 chroma_db_path: str = "./chroma_db",
-                 chroma_collection: str = "lab14",
-                 top_k: int = 4):
-        
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+    def __init__(
+        self,
+        chroma_db_path: str = "./chroma_db",
+        chroma_collection: str = "lab14",
+        top_k: int = 3,
+        optimized: bool = False,
+    ):
         self.top_k = top_k
-        print(f"--- Đang khởi tạo Agent (Device: {self.device}) ---")
+        self.optimized = optimized
         
-        # 1. Load Tokenizer & Model LLM
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
-            device_map="auto"
-        )
-        print(f"--- Model đã tải lên: {self.model.device} ---")
+        # Load embedding model
+        self.embed_model = SentenceTransformer("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2", device=device)
         
+        # Load local LLM
+        model_name = "Qwen/Qwen2.5-0.5B-Instruct"
         self.llm_pipeline = pipeline(
             "text-generation",
-            model=self.model,
-            tokenizer=self.tokenizer,
+            model=model_name,
+            device=device,
+            torch_dtype=torch.float16,
         )
-
-        # 2. Load Embedding Model
-        self.embed_model = SentenceTransformer(embed_model_name, device=self.device)
         
-        # 3. Setup ChromaDB
+        # Init ChromaDB
         self.chroma_client = chromadb.PersistentClient(path=chroma_db_path)
         self.collection = self.chroma_client.get_or_create_collection(name=chroma_collection)
+        print(f"--- Agent Initialized (Device: {device}, Optimized: {optimized}) ---")
 
     def index_documents(self, chunks_file: str):
-        """Nạp dữ liệu từ file chunks.jsonl vào ChromaDB"""
-        if not os.path.exists(chunks_file):
-            print(f"❌ Lỗi: Không tìm thấy file {chunks_file}")
-            return
-
-        print(f"Đang lập chỉ mục dữ liệu từ {chunks_file}...")
+        if not os.path.exists(chunks_file): return
         
-        ids = []
-        documents = []
-        metadatas = []
-        
-        with open(chunks_file, "r", encoding="utf-8") as f:
+        import json
+        ids, documents, embeddings = [], [], []
+        with open(chunks_file, 'r', encoding='utf-8') as f:
             for line in f:
                 data = json.loads(line)
-                ids.append(data["id"])
-                documents.append(data["text"])
-                metadatas.append(data.get("metadata", {}))
-
-        # Thêm vào ChromaDB theo từng batch để tránh lỗi bộ nhớ
-        batch_size = 100
-        for i in range(0, len(ids), batch_size):
-            end = min(i + batch_size, len(ids))
-            # Tính toán embeddings
-            embeddings = self.embed_model.encode(documents[i:end]).tolist()
-            
-            self.collection.upsert(
-                ids=ids[i:end],
-                documents=documents[i:end],
-                embeddings=embeddings,
-                metadatas=metadatas[i:end]
-            )
+                ids.append(data['id'])
+                documents.append(data['text'])
+                embeddings.append(self.embed_model.encode(data['text']).tolist())
         
-        print(f"--- Hoàn tất lập chỉ mục {len(ids)} đoạn vào ChromaDB ---")
+        self.collection.upsert(ids=ids, documents=documents, embeddings=embeddings)
+        print(f"--- Đã lập chỉ mục {len(ids)} đoạn vào ChromaDB ---")
 
-    async def query(self, question: str, top_k: Optional[int] = None) -> Dict:
-        """Quy trình RAG: Retrieval -> Prompting -> Generation"""
-        k = top_k or self.top_k
-        
+    async def query(self, question: str) -> Dict[str, Any]:
         # 1. Retrieval
-        question_emb = self.embed_model.encode([question]).tolist()
-        results = self.collection.query(
-            query_embeddings=question_emb,
-            n_results=k
-        )
+        search_queries = [question]
+        if self.optimized:
+            # V2: Mở rộng truy vấn để tăng Hit Rate
+            search_queries.append(f"Thông tin về {question} trong lịch sử Việt Nam")
         
-        retrieved_docs = results['documents'][0]
-        retrieved_ids = results['ids'][0]
-        context = "\n\n---\n\n".join(retrieved_docs)
+        all_docs, all_ids = [], []
+        for q in search_queries:
+            results = self.collection.query(
+                query_embeddings=[self.embed_model.encode(q).tolist()],
+                n_results=self.top_k
+            )
+            if results["documents"]:
+                all_docs.extend(results["documents"][0])
+                all_ids.extend(results["ids"][0])
 
-        # 2. Prompt Engineering (ChatML + XML)
-        system_prompt = """Bạn là một nhà sử học chuyên về Lịch sử Việt Nam. Nhiệm vụ của bạn là trả lời câu hỏi dựa trên tài liệu được cung cấp trong thẻ <context>.
-        QUY TẮC:
-        1. CHỈ sử dụng thông tin trong thẻ <context>.
-        2. Nếu thông tin không có trong tài liệu, hãy đáp 'Tôi không biết'. Tuyệt đối không tự bịa ra thông tin.
-        3. Trả lời chính xác, khách quan và ngắn gọn."""
+        # De-duplicate và lấy top_k
+        unique_docs = list(dict.fromkeys(all_docs))[:self.top_k]
+        unique_ids = list(dict.fromkeys(all_ids))[:self.top_k]
+        context = "\n\n---\n\n".join(unique_docs)
+
+        # 2. Prompt Engineering
+        if self.optimized:
+            # V2: Prompt chuyên sâu + Ví dụ
+            system_prompt = """Bạn là chuyên gia sử học Việt Nam. Chỉ dùng tài liệu <context> để trả lời. 
+Nếu không thấy thông tin, hãy đáp: 'Tôi không tìm thấy thông tin trong tài liệu'.
+Ví dụ: 
+Q: 'Nguyễn Huệ lên ngôi năm nào?' 
+A: 'Dựa trên tài liệu, Nguyễn Huệ lên ngôi năm 1788.'"""
+        else:
+            # V1: Prompt cơ bản
+            system_prompt = "Bạn là trợ lý ảo trả lời câu hỏi dựa trên tài liệu context được cung cấp."
 
         prompt = f"""<|im_start|>system
-        {system_prompt}<|im_end|>
-        <|im_start|>user
-        <context>
-        {context}
-        </context>
-
-        <question>
-        {question}
-        </question><|im_end|>
-        <|im_start|>assistant
-        """
+{system_prompt}<|im_end|>
+<|im_start|>user
+<context>
+{context}
+</context>
+Câu hỏi: {question}<|im_end|>
+<|im_start|>assistant
+"""
 
         # 3. Generation
         outputs = self.llm_pipeline(
-            prompt, 
-            max_new_tokens=350, 
-            do_sample=False, 
-            repetition_penalty=1.2,
-            eos_token_id=self.tokenizer.eos_token_id,
-            pad_token_id=self.tokenizer.pad_token_id,
+            prompt,
+            max_new_tokens=350,
+            do_sample=True,
+            temperature=0.1 if self.optimized else 0.7,
+            top_p=0.9,
+            pad_token_id=self.llm_pipeline.tokenizer.eos_token_id,
         )
         
-        full_text = outputs[0]['generated_text']
-        answer = full_text.split("<|im_start|>assistant")[-1].strip()
-
+        answer = outputs[0]["generated_text"].split("<|im_start|>assistant")[-1].strip()
+        
         return {
             "answer": answer,
-            "contexts": retrieved_docs,
-            "retrieved_ids": retrieved_ids, # Trả về IDs để evaluation tính Hit Rate
-            "metadata": {
-                "llm_model": "Qwen2.5-0.5B",
-                "db_type": "ChromaDB"
-            }
+            "retrieved_ids": unique_ids,
+            "contexts": unique_docs
         }
-
-if __name__ == "__main__":
-    import asyncio
-    
-    async def test():
-        # Khởi tạo với cấu hình mặc định (tương thích với main.py)
-        agent = MainAgent()
-        
-        # Lập chỉ mục từ file chunks.jsonl nếu có
-        chunks_path = "data/chunks.jsonl"
-        if os.path.exists(chunks_path):
-            agent.index_documents(chunks_path)
-        
-        q = "Hiệp định Paris được ký kết vào ngày tháng năm nào?"
-        print(f"\n❓ Câu hỏi test: {q}")
-        resp = await agent.query(q)
-        print(f"💡 Trả lời: {resp['answer']}")
-        print(f"📌 IDs đã tìm thấy: {resp['retrieved_ids']}")
-
-    asyncio.run(test())

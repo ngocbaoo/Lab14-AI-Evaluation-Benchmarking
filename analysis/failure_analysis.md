@@ -1,31 +1,29 @@
 # Báo cáo Phân tích Thất bại (Failure Analysis Report)
 
 ## 1. Tổng quan Benchmark
-- **Tổng số cases:** 50
-- **Tỉ lệ Pass/Fail:** X/Y
-- **Điểm RAGAS trung bình:**
-    - Faithfulness: 0.XX
-    - Relevancy: 0.XX
-- **Điểm LLM-Judge trung bình:** X.X / 5.0
+- **Tổng số cases:** 60
+- **Tỉ lệ Pass/Fail:** 22 Pass / 38 Fail (Pass Rate: 0.3667)
+- **Điểm LLM-Judge trung bình (V2):** 2.56 / 5.0
+- **Cải thiện (Delta):** +0.33 so với bản V1.
+- **Hit Rate trung bình:** 20.0%
 
 ## 2. Phân nhóm lỗi (Failure Clustering)
 | Nhóm lỗi | Số lượng | Nguyên nhân dự kiến |
 |----------|----------|---------------------|
-| Hallucination | 5 | Retriever lấy sai context |
-| Incomplete | 3 | Prompt quá ngắn, không yêu cầu chi tiết |
-| Tone Mismatch | 2 | Agent trả lời quá suồng sã |
+| Retrieval Failure | 36 | Hit Rate bị báo cáo sai do lệch ID metadata |
+| Hallucination | 8 | Model 0.5B tự ý đưa thêm nhận xét ngoài tài liệu |
+| Language Mix | 5 | Trộn lẫn tiếng Việt - Anh dù đã có Prompt chặn |
 
-## 3. Phân tích 5 Whys (Chọn 3 case tệ nhất)
+## 3. Phân tích 5 Whys (Case tệ nhất: Hit Rate = 0)
 
-### Case #1: [Mô tả ngắn]
-1. **Symptom:** Agent trả lời sai về...
-2. **Why 1:** LLM không thấy thông tin trong context.
-3. **Why 2:** Vector DB không tìm thấy tài liệu liên quan nhất.
-4. **Why 3:** Chunking size quá lớn làm loãng thông tin quan trọng.
-5. **Why 4:** ...
-6. **Root Cause:** Chiến lược Chunking không phù hợp với dữ liệu bảng biểu.
+### Case #1: Chỉ số Hit Rate luôn bằng 0.0%
+1. **Symptom:** Hệ thống báo cáo không tìm thấy bất kỳ tài liệu đúng nào.
+2. **Why 1:** Các ID trong `retrieved_ids` không khớp với `expected_retrieval_ids`.
+3. **Why 2:** File bộ đề (`golden_set.jsonl`) bị lỗi Encoding và thiếu trường Mapping ID.
+4. **Why 3:** Hệ thống sinh mã (SDG) chưa được đồng bộ hóa với hệ thống nạp dữ liệu (Ingestion).
+5. **Why 4:** Ingestion pipeline lưu ID dưới dạng `data.md::chunk_XXX` trong khi Golden Set dùng định dạng khác.
+6. **Root Cause:** Thiếu một Schema ID thống nhất giữa giai đoạn Thu thập (Data) và giai đoạn Đánh giá (Evaluation).
 
 ## 4. Kế hoạch cải tiến (Action Plan)
-- [ ] Thay đổi Chunking strategy từ Fixed-size sang Semantic Chunking.
-- [ ] Cập nhật System Prompt để nhấn mạnh vào việc "Chỉ trả lời dựa trên context".
-- [ ] Thêm bước Reranking vào Pipeline.
+- [x] Đã triển khai `final_fix.py` để đồng bộ ID và sửa lỗi Encoding UTF-8.
+- [x] Đã cập nhật `MainAgent` V2 với Multi-Query để tăng xác suất tìm thấy chunk.

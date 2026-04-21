@@ -1,0 +1,43 @@
+{
+  "metadata": {
+    "version": "Agent_V2_Optimized",
+    "total": 60,
+    "timestamp": "2026-04-21 20:43:32"
+  },
+  "metrics": {
+    "avg_score": 2.5583,
+    "hit_rate": 0.2,
+    "mrr": 0.1528,
+    "agreement_rate": 0.4833,
+    "pass_rate": 0.3667,
+    "human_review_rate": 0.1333,
+    "avg_latency_seconds": 9.3723
+  },
+  "cost": {
+    "total_usd": 0.0,
+    "by_model": {}
+  },
+  "token_usage": {
+    "prompt_tokens": 0,
+    "completion_tokens": 0
+  },
+  "human_review": {
+    "count": 8,
+    "rate": 0.1333
+  },
+  "regression": {
+    "baseline_version": "Agent_V1_Base",
+    "candidate_version": "Agent_V2_Optimized",
+    "avg_score_delta": 0.325,
+    "hit_rate_delta": 0.0,
+    "mrr_delta": 0.0,
+    "agreement_rate_delta": -0.0834,
+    "pass_rate_delta": 0.1667,
+    "human_review_rate_delta": 0.1,
+    "cost_delta_usd": 0.0,
+    "decision": "APPROVE",
+    "reasons": [
+      "candidate meets release criteria"
+    ]
+  }
+}
