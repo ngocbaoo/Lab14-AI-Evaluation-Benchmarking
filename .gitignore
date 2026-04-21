@@ -6,3 +6,4 @@ reports/
 data/golden_set.jsonl
 .codex
 .venv/
+chroma_db/

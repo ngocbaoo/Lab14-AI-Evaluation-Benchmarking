@@ -15,10 +15,10 @@
 
 ## 🛠️ Các nhiệm vụ chính (Expert Mission)
 
+
 ### 1. Retrieval & SDG (Nhóm Data)
 - **Retrieval Eval:** Tính toán Hit Rate và MRR cho Vector DB. Bạn phải chứng minh được Retrieval stage hoạt động tốt trước khi đánh giá Generation.
 - **SDG:** Tạo 50+ cases, bao gồm cả Ground Truth IDs của tài liệu để tính Hit Rate.
-
 ### 2. Multi-Judge Consensus Engine (Nhóm AI/Backend)
 - **Consensus logic:** Sử dụng ít nhất 2 model Judge khác nhau. 
 - **Calibration:** Tính toán hệ số đồng thuận (Agreement Rate) và xử lý xung đột điểm số tự động.

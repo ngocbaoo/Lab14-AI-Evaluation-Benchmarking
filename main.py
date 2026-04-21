@@ -35,6 +35,7 @@ class MultiModelJudge:
 
 async def run_benchmark_with_results(agent_version: str):
     print(f"🚀 Khởi động Benchmark cho {agent_version}...")
+    retrieval_top_k = int(os.getenv("RETRIEVAL_TOP_K", "3"))
 
     if not os.path.exists("data/golden_set.jsonl"):
         print("❌ Thiếu data/golden_set.jsonl. Hãy chạy 'python data/synthetic_gen.py' trước.")
@@ -47,7 +48,11 @@ async def run_benchmark_with_results(agent_version: str):
         print("❌ File data/golden_set.jsonl rỗng. Hãy tạo ít nhất 1 test case.")
         return None, None
 
-    runner = BenchmarkRunner(MainAgent(), ExpertEvaluator(), MultiModelJudge())
+    runner = BenchmarkRunner(
+        MainAgent(chroma_db_path=os.getenv("CHROMA_DB_PATH", "./chroma_db"), chroma_collection=os.getenv("CHROMA_COLLECTION", "lab14"), top_k=retrieval_top_k),
+        ExpertEvaluator(retrieval_top_k=retrieval_top_k),
+        MultiModelJudge(),
+    )
     results = await runner.run_all(dataset)
 
     total = len(results)
