@@ -1,6 +1,7 @@
 import json
 import asyncio
 import os
+import google.generativeai as genai
 from typing import List, Dict
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
